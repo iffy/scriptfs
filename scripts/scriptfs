@@ -1,4 +1,4 @@
 #!/usr/bin/env python
 
-from scriptfs import run
+from scriptfs.scriptfs import run
 run()
