@@ -29,7 +29,8 @@ class File(object):
     I correspond to a real file or path.
     """
 
-    def __init__(self, root):
+    def __init__(self, fs, root):
+        self.fs = fs
         self.root = realpath(root)
         self.rwlock = Lock()
 
@@ -37,7 +38,7 @@ class File(object):
         return '<%s 0x%x %r>' % (self.__class__.__name__, id(self), self.root)
 
     def child(self, segment):
-        return DynamicAwareFile(os.path.join(self.root, segment))
+        return File(self.fs, os.path.join(self.root, segment))
 
     def access(self, mode):
         if not os.access(self.root, mode):
@@ -132,9 +133,9 @@ class DynamicAwareFile(File):
 
     def child(self, segment):
         if segment in self.listRealChildren():
-            return DynamicAwareFile(os.path.join(self.root, segment))
+            return DynamicAwareFile(self.fs, os.path.join(self.root, segment))
         else:
-            return self.dynamicSettings().getFile(segment)
+            return self.dynamicSettings().getFile(self.fs, segment)
 
     def dynamicSettings(self):
         config_file = os.path.join(self.root, '.config.yml')
@@ -143,7 +144,7 @@ class DynamicAwareFile(File):
         if os.path.exists(config_file):
             fh = open(config_file, 'rb')
             data = yaml.safe_load(fh)
-        return DynamicSettings(data)
+        return DynamicSettings(config_file, data)
 
     # ------- fuse stuff
 
@@ -157,18 +158,26 @@ class DynamicAwareFile(File):
 class DynamicSettings(object):
 
 
-    def __init__(self, data):
-        self.data = data
+    def __init__(self, config_file, data):
+        self.data = data or []
+        self.config_file = config_file
 
 
     def listFiles(self):
         return [x['filename'] for x in self.data]
 
 
-    def getFile(self, filename):
+    def getFile(self, fs, filename):
         for item in self.data:
             if item['filename'] == filename:
-                return ScriptFile(item['out_script'])
+                # This variable substitution of $ROOT belongs somewhere
+                # else
+                workdir = item.get('workdir', '').replace('$ROOT', fs.mountpoint)
+                workdir = workdir or os.path.dirname(self.config_file)
+                return ScriptFile(fs=fs,
+                    workdir=workdir,
+                    out_script=item['out_script'],
+                    env=item.get('env', None))
 
 
 _cache = WeakKeyDictionary()
@@ -198,17 +207,27 @@ def cache(f):
 
 class ScriptFile(object):
 
-    def __init__(self, out_script):
+    def __init__(self, fs, workdir, out_script, env=None):
         self.out_script = out_script
+        self.workdir = workdir
+        self.env = env or {}
+        self.fs = fs
 
     def _runOutputScript(self):
         try:
             args = self.out_script
             print 'args', repr(args)
+            env = os.environ.copy()
+            env.update(self.env)
+            env['ROOT'] = self.fs.mountpoint
+            print 'cwd', repr(self.workdir)
             p = subprocess.Popen(self.out_script,
                 shell=True,
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE)
+                stderr=subprocess.PIPE,
+                env=env,
+                cwd=self.workdir)
             out, err = p.communicate('')
             print 'out?', repr(out)
             print 'err?', repr(err)
@@ -242,7 +261,7 @@ class ScriptFile(object):
 
     def getattr(self, fh=None):
         return dict(
-            st_mode=S_IFREG,
+            st_mode=(S_IFREG | 0440),
             st_nlink=1,
             st_size=self.get_size(),
             st_ctime=0,
@@ -302,8 +321,9 @@ class ScriptFile(object):
 
 class FileSystem(LoggingMixIn, Operations):
 
-    def __init__(self, root):
+    def __init__(self, root, mountpoint):
         self.root = realpath(root)
+        self.mountpoint = realpath(mountpoint)
         self.rwlock = Lock()
 
     def onresource(name):
@@ -323,11 +343,13 @@ class FileSystem(LoggingMixIn, Operations):
 
     def resource(self, path):
         segments = path.lstrip('/').split('/')
-        node = DynamicAwareFile(self.root)
+        node = DynamicAwareFile(self, self.root)
         for segment in segments:
             if not segment:
                 continue
             node = node.child(segment)
+        if not node:
+            return DynamicAwareFile(self, os.path.join(self.root, path.lstrip('/')))
         return node
 
     access = onresource('access')
@@ -362,7 +384,7 @@ if __name__ == '__main__':
     basedir = sys.argv[1]
     mountpoint = sys.argv[2]
     
-    fs = FileSystem(basedir)
+    fs = FileSystem(basedir, mountpoint)
     if not os.path.exists(mountpoint):
         os.makedirs(mountpoint)
     FUSE(fs, mountpoint, direct_io=True, foreground=True)
