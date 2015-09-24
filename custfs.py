@@ -1,5 +1,5 @@
 
-#from time import time
+from time import time
 from stat import S_IFREG
 from functools import wraps
 
@@ -64,12 +64,14 @@ class File(object):
         return dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
                 'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
 
-    getxattr = None
+    def getxattr(self, name, position=0):
+        raise FuseOSError(errno.EACCES)
 
     def link(self, target, source):
         return os.link(source, target)
 
-    listxattr = None
+    def listxattr(self):
+        return []
 
     def mkdir(self, *args, **kwargs):
         return os.mkdir(self.root, *args, **kwargs)
@@ -102,6 +104,9 @@ class File(object):
 
     def rmdir(self, *args, **kwargs):
         return os.rmdir(self.root, *args, **kwargs)
+
+    def setxattr(self, name, value, options, position=0):
+        pass
 
     def statfs(self):
         stv = os.statvfs(self.root)
@@ -139,7 +144,6 @@ class DynamicAwareFile(File):
 
     def dynamicSettings(self):
         config_file = os.path.join(self.root, '.config.yml')
-        print 'config_file', config_file
         data = []
         if os.path.exists(config_file):
             fh = open(config_file, 'rb')
@@ -170,10 +174,7 @@ class DynamicSettings(object):
     def getFile(self, fs, filename):
         for item in self.data:
             if item['filename'] == filename:
-                # This variable substitution of $ROOT belongs somewhere
-                # else
-                workdir = item.get('workdir', '').replace('$ROOT', fs.mountpoint)
-                workdir = workdir or os.path.dirname(self.config_file)
+                workdir = item.get('workdir', '') or os.path.dirname(self.config_file)
                 return ScriptFile(fs=fs,
                     workdir=workdir,
                     out_script=item['out_script'],
@@ -196,11 +197,13 @@ def cache(f):
         cache_key = getattr(self, '__cache_key__', None)
         if not cache_key:
             self.__cache_key__ = cache_key = _CacheKey(self, f)
-        last_updated = self.ppd.last_updated()
         last_run = _cache_last_run.get(cache_key, 0)
-        if last_updated > last_run or cache_key not in _cache:
+        now = time()
+        if last_run < (now - 1) or cache_key not in _cache:
             _cache[cache_key] = f(self, *args, **kwargs)
-            _cache_last_run[cache_key] = self.ppd.last_updated()
+            _cache_last_run[cache_key] = now
+        else:
+            print 'cached'
         return _cache[cache_key]
     return deco
 
@@ -213,6 +216,7 @@ class ScriptFile(object):
         self.env = env or {}
         self.fs = fs
 
+    @cache
     def _runOutputScript(self):
         try:
             args = self.out_script
@@ -329,8 +333,9 @@ class FileSystem(LoggingMixIn, Operations):
     def onresource(name):
         def func(self, path, *args, **kwargs):
             resource = self.resource(path)
-            print '  resource', resource
             method = getattr(resource, name)
+            if not method:
+                raise FuseOSError(errno.EACCES)
             try:
                 return method(*args, **kwargs)
             except Exception:
