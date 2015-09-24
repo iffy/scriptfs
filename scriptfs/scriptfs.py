@@ -385,12 +385,16 @@ class FileSystem(LoggingMixIn, Operations):
 
 
 
-if __name__ == '__main__':
+def run():
     basedir = sys.argv[1]
     mountpoint = sys.argv[2]
-    
     fs = FileSystem(basedir, mountpoint)
     if not os.path.exists(mountpoint):
         os.makedirs(mountpoint)
     FUSE(fs, mountpoint, direct_io=True, foreground=True)
+
+
+if __name__ == '__main__':
+    run()
+    
 
