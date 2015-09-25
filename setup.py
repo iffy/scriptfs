@@ -7,7 +7,7 @@ from distutils.core import setup
 
 setup(
     name='scriptfs',
-    version='0.1.0',
+    version='0.2.0',
     description='FUSE filesystem with scripts',
     author='Matt Haggard',
     author_email='haggardii@gmail.com',
@@ -18,6 +18,7 @@ setup(
     install_requires=[
         'PyYaml',
         'fusepy',
+        'xattr',
     ],
     scripts=[
         'scripts/scriptfs',

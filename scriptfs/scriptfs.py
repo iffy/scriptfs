@@ -2,11 +2,7 @@
 from stat import S_IFREG
 from functools import partial
 
-#from StringIO import StringIO
-
 import errno
-import yaml
-#import re
 import traceback
 import sys
 import os
@@ -14,6 +10,9 @@ from os.path import realpath
 from threading import Lock
 
 import subprocess
+
+import yaml
+from xattr import xattr
 
 from fuse import FUSE
 from fuse import LoggingMixIn, Operations, FuseOSError
@@ -63,13 +62,16 @@ class File(object):
                 'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
 
     def getxattr(self, name, position=0):
-        raise FuseOSError(errno.EACCES)
+        try:
+            return xattr(self.root).get(name)
+        except IOError:
+            return ''
 
     def link(self, target, source):
         return os.link(source, target)
 
     def listxattr(self):
-        return []
+        return xattr(self.root).list()
 
     def mkdir(self, *args, **kwargs):
         return os.mkdir(self.root, *args, **kwargs)
@@ -104,7 +106,7 @@ class File(object):
         return os.rmdir(self.root, *args, **kwargs)
 
     def setxattr(self, name, value, options, position=0):
-        pass
+        return xattr(self.root).set(name, value, options)
 
     def statfs(self):
         stv = os.statvfs(self.root)
@@ -369,7 +371,7 @@ class FileSystem(LoggingMixIn, Operations):
         return self._caches[filename]
 
     def __call__(self, op, path, *args):
-        print op, path, args
+        # print op, path, args
         return super(FileSystem, self).__call__(op, path, *args)
 
     def resource(self, path):
