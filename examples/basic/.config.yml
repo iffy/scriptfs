@@ -13,3 +13,12 @@
   cache:
     method: stat
     path: .
+
+# a read-only file that contains the current time
+# and only updates when the current directory and children are modified
+- filename: now
+  out_script: date
+  cache:
+    method: stat
+    path: .
+    recurse: yes

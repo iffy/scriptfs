@@ -81,7 +81,6 @@ class File(object):
         return os.open(self.root, *args, **kwargs)
 
     def read(self, size, offset, fh):
-        print '--- LOCK asking for read lock', self.rwlock
         with self.rwlock:
             os.lseek(fh, offset, 0)
             return os.read(fh, size)
@@ -127,7 +126,6 @@ class File(object):
         return os.utime(self.root, *args, **kwargs)
 
     def write(self, data, offset, fh):
-        print '--- LOCK asking for write lock', self.rwlock
         with self.rwlock:
             os.lseek(fh, offset, 0)
             return os.write(fh, data)
@@ -172,13 +170,13 @@ class DynamicSettings(object):
         return [x['filename'] for x in self.data]
 
 
-    def generateCacheKey(self, filename):
+    def fullfilename(self, filename):
         return os.path.join(os.path.dirname(self.config_file), filename)
 
     def getFile(self, fs, filename):
         for item in self.data:
             if item['filename'] == filename:
-                cacher = fs.getCacher(self.generateCacheKey(filename),
+                cacher = fs.getCacher(self.fullfilename(filename),
                                       item.get('cache'))
                 workdir = item.get('workdir', '') or os.path.dirname(self.config_file)
                 return ScriptFile(fs=fs,
@@ -196,20 +194,30 @@ class NoCacher(object):
 
 class StatCacher(object):
 
-    def __init__(self, path):
+    def __init__(self, path, recurse=False):
         self._cached_mtime = None
         self._cached_val = None
         self.path = os.path.abspath(path)
+        self.recurse = recurse
+
+
+    def _directories(self):
+        for f in os.walk(self.path):
+            yield f[0]
+
+
+    def get_mtime(self):
+        if self.recurse:
+            return max((os.stat(x).st_mtime for x in self._directories()))
+        else:
+            return os.stat(self.path).st_mtime
 
 
     def __call__(self, func, *args, **kwargs):
-        mtime = os.stat(self.path).st_mtime
+        mtime = self.get_mtime()
         if mtime != self._cached_mtime:
-            print 'executing script', mtime, self._cached_mtime
             self._cached_val = func(*args, **kwargs)
             self._cached_mtime = mtime
-        else:
-            print 'using cached value'
         return self._cached_val
 
 
@@ -230,12 +238,10 @@ class ScriptFile(object):
     def _runOutputScript(self):
         try:
             args = self.out_script
-            print 'args', repr(args)
             env = os.environ.copy()
             env.update(self.env)
             env['ROOT'] = self.fs.mountpoint
-            print 'cwd', repr(self.workdir)
-            p = subprocess.Popen(self.out_script,
+            p = subprocess.Popen(args,
                 shell=True,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -243,11 +249,8 @@ class ScriptFile(object):
                 env=env,
                 cwd=self.workdir)
             out, err = p.communicate('')
-            print 'out?', repr(out)
-            print 'err?', repr(err)
             return out
         except Exception as e:
-            print 'traceback', e
             return traceback.format_exc(e)
 
     def get_size(self):
@@ -354,13 +357,16 @@ class FileSystem(LoggingMixIn, Operations):
                 raise
         return func
 
-    def getCacher(self, key, cache_settings):
-        if key not in self._caches:
+    def getCacher(self, filename, cache_settings):
+        if filename not in self._caches:
             if cache_settings is None:
-                self._caches[key] = NoCacher()
+                self._caches[filename] = NoCacher()
             else:
-                self._caches[key] = StatCacher(cache_settings['path'])
-        return self._caches[key]
+                kwargs = cache_settings.copy()
+                kwargs.pop('method')
+                kwargs['path'] = os.path.join(os.path.dirname(filename), kwargs['path'])
+                self._caches[filename] = StatCacher(**kwargs)
+        return self._caches[filename]
 
     def __call__(self, op, path, *args):
         print op, path, args
