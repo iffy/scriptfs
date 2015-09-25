@@ -1,0 +1,15 @@
+# a read-only file that always contains bob\n
+- filename: bob
+  out_script: echo bob
+
+# a read-only file that displays the pwd
+- filename: pwd
+  out_script: pwd
+
+# a read-only file that lists the current directory
+# and only updates when the current directory is modified.
+- filename: contents
+  out_script: ls -al
+  cache:
+    method: stat
+    path: .
