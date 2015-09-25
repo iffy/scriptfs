@@ -1,7 +1,6 @@
 
-from time import time
 from stat import S_IFREG
-from functools import wraps
+from functools import partial
 
 #from StringIO import StringIO
 
@@ -13,7 +12,6 @@ import sys
 import os
 from os.path import realpath
 from threading import Lock
-from weakref import WeakKeyDictionary
 
 import subprocess
 
@@ -133,6 +131,7 @@ class File(object):
             return os.write(fh, data)
 
 
+
 class DynamicAwareFile(File):
 
 
@@ -171,61 +170,78 @@ class DynamicSettings(object):
         return [x['filename'] for x in self.data]
 
 
+    def fullfilename(self, filename):
+        return os.path.join(os.path.dirname(self.config_file), filename)
+
     def getFile(self, fs, filename):
         for item in self.data:
             if item['filename'] == filename:
+                cacher = fs.getCacher(self.fullfilename(filename),
+                                      item.get('cache'))
                 workdir = item.get('workdir', '') or os.path.dirname(self.config_file)
                 return ScriptFile(fs=fs,
                     workdir=workdir,
                     out_script=item['out_script'],
+                    cacher=cacher,
                     env=item.get('env', None))
 
 
-_cache = WeakKeyDictionary()
-_cache_last_run = WeakKeyDictionary()
+class NoCacher(object):
 
-class _CacheKey(object):
-
-    def __init__(self, *args):
-        self.args = args
+    def __call__(self, func, *args, **kwargs):
+        return func(*args, **kwargs)
 
 
-def cache(f):
-    @wraps(f)
-    def deco(self, *args, **kwargs):
-        # a string?  really?
-        cache_key = getattr(self, '__cache_key__', None)
-        if not cache_key:
-            self.__cache_key__ = cache_key = _CacheKey(self, f)
-        last_run = _cache_last_run.get(cache_key, 0)
-        now = time()
-        if last_run < (now - 1) or cache_key not in _cache:
-            _cache[cache_key] = f(self, *args, **kwargs)
-            _cache_last_run[cache_key] = now
+class StatCacher(object):
+
+    def __init__(self, path, recurse=False):
+        self._cached_mtime = None
+        self._cached_val = None
+        self.path = os.path.abspath(path)
+        self.recurse = recurse
+
+
+    def _directories(self):
+        for f in os.walk(self.path):
+            yield f[0]
+
+
+    def get_mtime(self):
+        if self.recurse:
+            return max((os.stat(x).st_mtime for x in self._directories()))
         else:
-            print 'cached'
-        return _cache[cache_key]
-    return deco
+            return os.stat(self.path).st_mtime
+
+
+    def __call__(self, func, *args, **kwargs):
+        mtime = self.get_mtime()
+        if mtime != self._cached_mtime:
+            self._cached_val = func(*args, **kwargs)
+            self._cached_mtime = mtime
+        return self._cached_val
+
 
 
 class ScriptFile(object):
 
-    def __init__(self, fs, workdir, out_script, env=None):
+    def __init__(self, fs, workdir, out_script, cacher=None,
+                 env=None):
         self.out_script = out_script
         self.workdir = workdir
         self.env = env or {}
         self.fs = fs
+        if cacher:
+            self.getContents = partial(cacher, self._runOutputScript)
+        else:
+            self.getContents = self._runOutputScript
 
-    @cache
     def _runOutputScript(self):
         try:
             args = self.out_script
-            print 'args', repr(args)
             env = os.environ.copy()
             env.update(self.env)
             env['ROOT'] = self.fs.mountpoint
-            print 'cwd', repr(self.workdir)
-            p = subprocess.Popen(self.out_script,
+            p = subprocess.Popen(args,
                 shell=True,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -233,15 +249,12 @@ class ScriptFile(object):
                 env=env,
                 cwd=self.workdir)
             out, err = p.communicate('')
-            print 'out?', repr(out)
-            print 'err?', repr(err)
             return out
         except Exception as e:
-            print 'traceback', e
             return traceback.format_exc(e)
 
     def get_size(self):
-        return len(self._runOutputScript())
+        return len(self.getContents())
 
     def access(self, mode):
         pass
@@ -289,7 +302,7 @@ class ScriptFile(object):
         return 0
 
     def read(self, size, offset, fh):
-        return self._runOutputScript()[offset:offset + size]
+        return self.getContents()[offset:offset + size]
 
     def readdir(self, fh):
         raise FuseOSError(errno.EACCES)
@@ -328,7 +341,9 @@ class FileSystem(LoggingMixIn, Operations):
     def __init__(self, root, mountpoint):
         self.root = realpath(root)
         self.mountpoint = realpath(mountpoint)
+        print 'root %r -> mount %r' % (self.root, self.mountpoint)
         self.rwlock = Lock()
+        self._caches = {}
 
     def onresource(name):
         def func(self, path, *args, **kwargs):
@@ -341,6 +356,17 @@ class FileSystem(LoggingMixIn, Operations):
             except Exception:
                 raise
         return func
+
+    def getCacher(self, filename, cache_settings):
+        if filename not in self._caches:
+            if cache_settings is None:
+                self._caches[filename] = NoCacher()
+            else:
+                kwargs = cache_settings.copy()
+                kwargs.pop('method')
+                kwargs['path'] = os.path.join(os.path.dirname(filename), kwargs['path'])
+                self._caches[filename] = StatCacher(**kwargs)
+        return self._caches[filename]
 
     def __call__(self, op, path, *args):
         print op, path, args
